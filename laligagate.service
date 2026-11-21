@@ -1,0 +1,21 @@
+[Unit]
+Description=Bypass LaLigaGate - proxy de Cloudflare OFF durante bloqueos de futbol
+Documentation=https://github.com/fernandotellado/bypass-laligagate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/laligagate/laligagate.py daemon
+Restart=on-failure
+RestartSec=30
+StateDirectory=laligagate
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/laligagate
+
+[Install]
+WantedBy=multi-user.target

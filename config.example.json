@@ -1,0 +1,20 @@
+{
+  "cloudflare": {
+    "api_token": "PEGA_AQUI_TU_API_TOKEN",
+    "zone_id": "PEGA_AQUI_EL_ZONE_ID",
+    "zone_name": "example.com"
+  },
+  "records": ["*.example.com"],
+  "detection": {
+    "mode": "global",
+    "min_isps": 1
+  },
+  "timing": {
+    "interval_minutes": 15,
+    "restore_wait_minutes": 60
+  },
+  "source": {
+    "txt_base": "https://hayahora.futbol/estado/",
+    "max_data_age_hours": 3
+  }
+}
