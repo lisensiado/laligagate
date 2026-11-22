@@ -1,30 +1,41 @@
 # laligagate
 
-Servicio autónomo (sin dependencias) que desactiva el proxy de
-Cloudflare mientras hay bloqueos de IP por fútbol en España y lo restaura
-cuando terminan.
+Servicio autónomo (sin dependencias) que, mientras hay bloqueos de IP por fútbol
+en España, hace dos cosas y las deshace al terminar:
+
+1. **Saca el dominio personal de detrás de Cloudflare**: pone los registros DNS
+   indicados en **DNS Only** (quita la nube naranja) para que resuelvan
+   directamente a su origen.
+2. **Cambia el resolver DNS de la red**: ejecuta los *hooks* configurados. El
+   uso típico es apuntar el DNS local a un resolver como
+   [xdp.es](https://xdp.es/), que devuelve IPs alternativas no bloqueadas, y
+   restaurar el habitual cuando cesa el bloqueo.
 
 Consulta [hayahora.futbol](https://hayahora.futbol/) cada N minutos. Si hay
-bloqueos activos, pone los registros DNS indicados en **DNS Only** (sin nube
-naranja). Cuando cesan y pasa el periodo de espera, reactiva el proxy **solo en
-los registros que apagó él**, con su TTL original; nunca activa un registro que
-ya era DNS Only. Además, en cada transición ejecuta los *hooks* configurados,
-útiles para conmutar otros servicios de la red (por ejemplo, el resolver DNS).
+bloqueos activos, aplica el punto 1 y ejecuta `hooks.on_blocked` (punto 2); si
+cesan, ejecuta `hooks.on_clear` y, tras el periodo de espera, reactiva el proxy
+**solo en los registros que apagó él**, con su TTL original. Nunca activa un
+registro que ya era DNS Only.
 
 ## Cómo funciona
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Comprobando
-    Comprobando --> ProxyOFF: bloqueo activo según el modo
-    Comprobando --> EstadoAnterior: error o datos obsoletos
-    ProxyOFF --> ProxyOFF: siguen los bloqueos
-    ProxyOFF --> Espera: sin bloqueos
-    Espera --> ProxyOFF: vuelven los bloqueos
-    Espera --> ProxyON: N minutos sin bloqueos
-    ProxyON --> ProxyOFF: nuevos bloqueos
-    ProxyON --> [*]
+flowchart TD
+    A["Comprobación cada N minutos"] -->|bloqueo activo| B["1. Cloudflare: DNS Only"]
+    A -->|error o datos obsoletos| H["Sin cambios"]
+    B --> C["2. hook on_blocked: DNS de la red → xdp.es"]
+    C --> D{"¿sigue el bloqueo?"}
+    D -->|sí| D
+    D -->|no| E["hook on_clear: DNS de la red → resolver habitual"]
+    E --> F["Espera restore_wait_minutes"]
+    F -->|vuelve el bloqueo| B
+    F -->|sigue sin bloqueos| G["Cloudflare: proxied"]
+    G --> A
 ```
+
+Los hooks se disparan con la detección, así que el DNS vuelve al resolver
+habitual en cuanto cesa el bloqueo, mientras que el proxy puede seguir en
+DNS Only durante la espera configurada.
 
 - **Datos obsoletos**: si la fuente lleva más de `max_data_age_hours` sin
   actualizarse, se trata como error y no se cambia nada. Un fichero vacío de un
