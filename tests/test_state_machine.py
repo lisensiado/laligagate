@@ -1,4 +1,4 @@
-import importlib.util, json, os, shutil, sys, tempfile
+import importlib.util, json, os, shutil, sys, tempfile, time
 
 STATE_DIR = tempfile.mkdtemp(prefix="blg-test-")
 os.environ["BLG_STATE_DIR"] = STATE_DIR
@@ -134,6 +134,73 @@ expect(bool(r["error"]) and r["source"] == "txt (obsoleto)", "datos de hace 4 h 
 blg.fetch_ip_list = fake_fetch({"blocked-any.txt": (set(), 0, "")})
 r = blg.check_blocks(CONFIG, set())
 expect(r["error"] == "" and r["blocked"] is False, "sin Last-Modified se acepta la respuesta")
+
+# 8. Modo web: misma regla que la portada de hayahora.futbol.
+def web_entry(ip, isp, states, desc="Cloudflare"):
+    stamp = time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(CLOCK[0]))
+    return {"ip": ip, "isp": isp, "description": desc,
+            "stateChanges": [{"timestamp": stamp, "state": s} for s in states]}
+
+def fake_http_json(payload, status=200):
+    body = json.dumps(payload).encode("utf-8")
+    def _http(url, method="GET", headers=None, payload=None, timeout=20, retries=3, limit=None):
+        return status, {}, body
+    return _http
+
+stamp = time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(CLOCK[0]))
+cfg_web = json.loads(json.dumps(CONFIG)); cfg_web["detection"]["mode"] = "web"
+
+def over_two(count):
+    return [web_entry("10.0.0.%d" % n, isp, [True])
+            for n in range(count) for isp in ("Movistar", "Vodafone", "Orange")]
+
+blg.http = fake_http_json({"lastUpdate": stamp, "data": []})
+r = blg.check_blocks(cfg_web, set())
+expect(r["blocked"] is False and r["source"] == "web(r=0,par=no)", "web sin datos no bloquea")
+
+blg.http = fake_http_json({"lastUpdate": stamp, "data": over_two(10)})
+r = blg.check_blocks(cfg_web, set())
+expect(r["blocked"] is False and r["blocked_ips"] == 10, "web: 10 IPs x 3 ISPs no basta")
+
+blg.http = fake_http_json({"lastUpdate": stamp, "data": over_two(11)})
+r = blg.check_blocks(cfg_web, set())
+expect(r["blocked"] is True, "web: 11 IPs x 3 ISPs bloquea")
+
+single = [web_entry("10.0.1.%d" % n, "Movistar", [True]) for n in range(29)]
+single.append(web_entry("10.0.2.1", "Vodafone", [True]))
+blg.http = fake_http_json({"lastUpdate": stamp, "data": single})
+r = blg.check_blocks(cfg_web, set())
+expect(r["blocked"] is False and r["blocked_ips"] == 30
+       and r["isp_names"] == ["Movistar(29)", "Vodafone(1)"],
+       "web: cola de un solo ISP no bloquea")
+
+blg.http = fake_http_json({"lastUpdate": stamp, "data": [
+    web_entry("188.114.96.5", "Movistar", [True]),
+    web_entry("188.114.97.5", "Vodafone", [True]),
+]})
+r = blg.check_blocks(cfg_web, set())
+expect(r["blocked"] is True, "web: el par Cloudflare bloqueado bloquea")
+
+blg.http = fake_http_json({"lastUpdate": stamp, "data": [
+    web_entry("188.114.96.5", "Movistar", [True]),
+]})
+r = blg.check_blocks(cfg_web, set())
+expect(r["blocked"] is False, "web: medio par no bloquea")
+
+blg.http = fake_http_json({"lastUpdate": stamp,
+                           "data": over_two(11) + [web_entry("10.0.9.1", "Orange", [True, False])]})
+r = blg.check_blocks(cfg_web, set())
+expect(r["blocked_ips"] == 11, "web: manda el ultimo stateChange, no el historico")
+
+blg.http = fake_http_json({"lastUpdate": time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(CLOCK[0] - 4 * 3600)),
+                           "data": over_two(11)})
+r = blg.check_blocks(cfg_web, set())
+expect(bool(r["error"]) and r["source"] == "web (obsoleto)" and r["blocked"] is False,
+       "web: data.json obsoleto no bloquea")
+
+blg.http = fake_http_json({"lastUpdate": stamp, "data": over_two(11)}, status=500)
+r = blg.check_blocks(cfg_web, set())
+expect("500" in r["error"] and r["blocked"] is False, "web: error HTTP no bloquea")
 
 shutil.rmtree(STATE_DIR)
 print("\nTodos los escenarios OK")

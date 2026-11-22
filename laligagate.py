@@ -18,6 +18,7 @@ Subcomandos:
 """
 
 import argparse
+import calendar
 import email.utils
 import fcntl
 import ipaddress
@@ -30,7 +31,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 CONFIG_PATH = os.environ.get("BLG_CONFIG", "/etc/laligagate/config.json")
 STATE_DIR = os.environ.get("BLG_STATE_DIR", "/var/lib/laligagate")
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
@@ -51,6 +52,12 @@ DOH_ENDPOINTS = (
     "https://dns.google/resolve",
 )
 OWN_IPS_TTL = 6 * 3600
+
+# Regla de hayahora.futbol (la que decide su veredicto SÍ/NO). Modo "web".
+WEB_DATA_FILE = "data.json"
+WEB_MAX_BYTES = 64 * 1024 * 1024
+WEB_CF_PAIR = ("188.114.96.5", "188.114.97.5")
+WEB_MIN_IPS_OVER_2_ISPS = 10
 
 
 # --------------------------------------------------------------------------
@@ -212,6 +219,92 @@ class Cloudflare:
 # Deteccion
 # --------------------------------------------------------------------------
 
+def parse_web_last_update(value):
+    if not value:
+        return 0
+    try:
+        return calendar.timegm(time.strptime(str(value), "%Y-%m-%d %H:%M:%SZ"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def parse_web_status(payload):
+    """Replica la regla del frontend de hayahora.futbol.
+
+    Activo si mas de 10 IPs de Cloudflare estan bloqueadas simultaneamente por
+    mas de 2 operadores, o si el par 188.114.96.5/188.114.97.5 esta bloqueado.
+    """
+    blocked = set()
+    isp_hits = {}
+    cf_hits = {}
+    pair_blocked = set()
+    for entry in payload.get("data") or []:
+        changes = entry.get("stateChanges") or []
+        if not changes:
+            continue
+        # La web usa stateChanges[-1], no el timestamp maximo.
+        if changes[-1].get("state") is not True:
+            continue
+        ip = str(entry.get("ip") or "")
+        if not ip:
+            continue
+        isp = str(entry.get("isp") or "?")
+        blocked.add(ip)
+        isp_hits[isp] = isp_hits.get(isp, 0) + 1
+        if entry.get("description") == "Cloudflare":
+            cf_hits[ip] = cf_hits.get(ip, 0) + 1
+            if ip in WEB_CF_PAIR:
+                pair_blocked.add(ip)
+    over_two = sum(1 for hits in cf_hits.values() if hits > 2)
+    pair_ok = all(ip in pair_blocked for ip in WEB_CF_PAIR)
+    active = over_two > WEB_MIN_IPS_OVER_2_ISPS or pair_ok
+    return active, blocked, isp_hits, over_two, pair_ok
+
+
+def check_web_blocks(config, result, base):
+    max_age_hours = float(config["source"].get("max_data_age_hours", 3))
+    try:
+        status, _, body = http(
+            base + WEB_DATA_FILE, timeout=30, limit=WEB_MAX_BYTES, retries=2
+        )
+    except RuntimeError as exc:
+        result["error"] = str(exc)
+        result["source"] = "web (error)"
+        return result
+    if status != 200:
+        result["error"] = "HTTP %d al leer %s" % (status, WEB_DATA_FILE)
+        result["source"] = "web (error)"
+        return result
+    try:
+        payload = json.loads(body.decode("utf-8", "replace"))
+    except ValueError as exc:
+        result["error"] = "%s no es JSON valido: %s" % (WEB_DATA_FILE, exc)
+        result["source"] = "web (error)"
+        return result
+
+    last_update = parse_web_last_update(payload.get("lastUpdate"))
+    result["last_update"] = last_update
+    if last_update and max_age_hours > 0:
+        age = now() - last_update
+        if age > max_age_hours * 3600:
+            result["error"] = (
+                "los datos de hayahora.futbol llevan %s sin actualizarse; "
+                "no se puede saber si hay bloqueos" % human_duration(age)
+            )
+            result["source"] = "web (obsoleto)"
+            return result
+
+    active, blocked, isp_hits, over_two, pair_ok = parse_web_status(payload)
+    result["blocked"] = active
+    result["blocked_ips"] = len(blocked)
+    result["blocked_isps"] = len(isp_hits)
+    result["isp_names"] = [
+        "%s(%d)" % (name, hits) for name, hits in sorted(isp_hits.items())
+    ]
+    result["source"] = "web(r=%d,par=%s)" % (over_two, "si" if pair_ok else "no")
+    return result
+
+
 def check_blocks(config, own_ips):
     settings = config["detection"]
     mode = settings.get("mode", "global")
@@ -224,17 +317,23 @@ def check_blocks(config, own_ips):
         mode = "global"
         degraded = True
 
-    ips, last_update, error = fetch_ip_list(base + "blocked-any.txt")
     result = {
         "blocked": False,
-        "error": error,
+        "error": "",
         "blocked_ips": 0,
         "blocked_isps": 0,
         "isp_names": [],
         "mode": mode,
         "source": "txt",
-        "last_update": last_update,
+        "last_update": 0,
     }
+
+    if mode == "web":
+        return check_web_blocks(config, result, base)
+
+    ips, last_update, error = fetch_ip_list(base + "blocked-any.txt")
+    result["error"] = error
+    result["last_update"] = last_update
     if error:
         return result
 
@@ -624,15 +723,24 @@ def cmd_status(config):
     print("Config:        %s" % CONFIG_PATH)
     print("Zona:          %s (%s)" % (cloudflare.get("zone_name") or "?", cloudflare["zone_id"]))
     print("Registros:     %s" % (", ".join(config["records"]) or "todos los proxied"))
-    print(
-        "Deteccion:     %s, ISPs minimos %s, cada %s min, espera %s min"
-        % (
-            config["detection"]["mode"],
-            config["detection"]["min_isps"],
-            config["timing"]["interval_minutes"],
-            config["timing"]["restore_wait_minutes"],
+    if config["detection"]["mode"] == "web":
+        print(
+            "Deteccion:     web (umbral de hayahora.futbol), cada %s min, espera %s min"
+            % (
+                config["timing"]["interval_minutes"],
+                config["timing"]["restore_wait_minutes"],
+            )
         )
-    )
+    else:
+        print(
+            "Deteccion:     %s, ISPs minimos %s, cada %s min, espera %s min"
+            % (
+                config["detection"]["mode"],
+                config["detection"]["min_isps"],
+                config["timing"]["interval_minutes"],
+                config["timing"]["restore_wait_minutes"],
+            )
+        )
     checked = int(state.get("last_check") or 0)
     print(
         "Ultima comprob.: %s"

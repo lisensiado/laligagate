@@ -15,7 +15,7 @@ ya era DNS Only.
 ```mermaid
 stateDiagram-v2
     [*] --> Comprobando
-    Comprobando --> ProxyOFF: bloqueos ≥ min_isps
+    Comprobando --> ProxyOFF: bloqueo activo según el modo
     Comprobando --> EstadoAnterior: error o datos obsoletos
     ProxyOFF --> ProxyOFF: siguen los bloqueos
     ProxyOFF --> Espera: sin bloqueos
@@ -28,10 +28,16 @@ stateDiagram-v2
 - **Datos obsoletos**: si la fuente lleva más de `max_data_age_hours` sin
   actualizarse, se trata como error y no se cambia nada. Un fichero vacío de un
   generador parado no es un «no hay bloqueos».
-- **Dos modos**: `global` (cualquier bloqueo en España, preventivo) y `own_ip`
-  (solo si las IPs de Cloudflare que sirven estos registros aparecen en la
-  lista, resueltas por DNS sobre HTTPS).
+- **Tres modos**: `web` (el mismo umbral que la portada de hayahora.futbol:
+  actúa solo cuando esa portada diría «SÍ»), `global` (cualquier bloqueo en
+  España, preventivo) y `own_ip` (solo si las IPs de Cloudflare que sirven estos
+  registros aparecen en la lista, resueltas por DNS sobre HTTPS).
+- **Modo `web`**: reproduce la regla exacta del frontend sobre
+  `estado/data.json` — más de 10 IPs de Cloudflare bloqueadas a la vez por más
+  de 2 operadores, o el par `188.114.96.5`/`188.114.97.5` bloqueado. Ignora
+  `min_isps`; si `data.json` falla o está obsoleto no se toca nada.
 - **`min_isps`**: número de operadores distintos con bloqueo para actuar (1-5).
+  Solo aplica a `global` y `own_ip`.
 - **Override manual**: `proxy off` congela el automatismo; `proxy on` restaura
   al instante; `proxy auto` devuelve el control al servicio.
 - **Concurrencia**: un `flock` impide que el demonio y un comando manual hagan
@@ -67,8 +73,8 @@ Si el fichero de configuración ya existe, no lo sobrescribe.
 | `cloudflare.zone_id` | ID de la zona |
 | `cloudflare.zone_name` | Nombre de la zona (para `"@"`) |
 | `records` | Nombres a gestionar; `[]` = todos los A/AAAA/CNAME |
-| `detection.mode` | `global` o `own_ip` |
-| `detection.min_isps` | Operadores con bloqueo necesarios (1-5) |
+| `detection.mode` | `web`, `global` o `own_ip` |
+| `detection.min_isps` | Operadores con bloqueo necesarios (1-5); solo `global`/`own_ip` |
 | `timing.interval_minutes` | Frecuencia de comprobación |
 | `timing.restore_wait_minutes` | Espera antes de reactivar el proxy |
 | `source.max_data_age_hours` | Antigüedad máxima aceptada de la fuente |

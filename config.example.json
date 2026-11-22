@@ -6,7 +6,7 @@
   },
   "records": ["*.example.com"],
   "detection": {
-    "mode": "global",
+    "mode": "web",
     "min_isps": 1
   },
   "timing": {
