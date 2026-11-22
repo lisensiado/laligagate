@@ -78,8 +78,31 @@ Si el fichero de configuración ya existe, no lo sobrescribe.
 | `timing.interval_minutes` | Frecuencia de comprobación |
 | `timing.restore_wait_minutes` | Espera antes de reactivar el proxy |
 | `source.max_data_age_hours` | Antigüedad máxima aceptada de la fuente |
+| `hooks.on_blocked` | Comando (lista de argumentos) al pasar a bloqueo |
+| `hooks.on_clear` | Comando al cesar el bloqueo |
+| `hooks.timeout_seconds` | Tiempo máximo por hook (30 por defecto) |
 
 Tras editar la configuración: `systemctl restart laligagate`.
+
+### Hooks de transición
+
+Permiten reaccionar al cambio de estado sin sondear el fichero de estado. Se
+ejecutan una sola vez por transición, **después** de aplicar los cambios DNS y
+de persistir el estado, así que el comando puede leer `state.json` para saber
+el estado real. Se lanzan sin shell, como lista de argumentos:
+
+```json
+"hooks": {
+  "on_blocked": ["/usr/local/bin/mi-script", "bloqueo"],
+  "on_clear": ["/usr/local/bin/mi-script", "libre"],
+  "timeout_seconds": 30
+}
+```
+
+Si un hook falla o expira, se registra el aviso y se reintenta en el siguiente
+ciclo (el estado del hook no se actualiza). Un error de la fuente no dispara
+hooks ni cambia el estado de bloqueo. `laligagate check --dry-run` muestra qué
+hook ejecutaría sin lanzarlo.
 
 ## Comandos
 

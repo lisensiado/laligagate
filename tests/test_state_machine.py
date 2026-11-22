@@ -202,5 +202,54 @@ blg.http = fake_http_json({"lastUpdate": stamp, "data": over_two(11)}, status=50
 r = blg.check_blocks(cfg_web, set())
 expect("500" in r["error"] and r["blocked"] is False, "web: error HTTP no bloquea")
 
+# 9. Hooks de transicion: una vez por cambio, reintento si fallan, dry-run no ejecuta.
+HOOK = os.path.join(STATE_DIR, "hook.sh")
+HOOK_LOG = os.path.join(STATE_DIR, "hook.log")
+with open(HOOK, "w") as fh:
+    fh.write('#!/bin/sh\necho "$1" >> "$2"\n')
+os.chmod(HOOK, 0o755)
+cfg_hook = json.loads(json.dumps(CONFIG))
+cfg_hook["hooks"] = {"on_blocked": [HOOK, "blocked", HOOK_LOG],
+                     "on_clear": [HOOK, "clear", HOOK_LOG], "timeout_seconds": 10}
+
+blg.check_blocks = lambda cfg, own: dict(SOURCE)
+st = blg.default_state()
+SOURCE.update(blocked=False, error="", blocked_ips=0)
+blg.apply_cycle(cfg_hook, st)
+expect(open(HOOK_LOG).read().split() == ["clear"], "hook on_clear en el primer ciclo")
+
+blg.apply_cycle(cfg_hook, st)
+expect(open(HOOK_LOG).read().split() == ["clear"], "no repite el hook sin transicion")
+
+SOURCE.update(blocked=True, blocked_ips=5)
+blg.apply_cycle(cfg_hook, st)
+expect(open(HOOK_LOG).read().split() == ["clear", "blocked"], "hook on_blocked al detectar")
+
+cfg_fail = json.loads(json.dumps(cfg_hook))
+cfg_fail["hooks"]["on_clear"] = ["/bin/false"]
+SOURCE.update(blocked=False, blocked_ips=0)
+blg.apply_cycle(cfg_fail, st)
+expect(open(HOOK_LOG).read().split() == ["clear", "blocked"], "un hook fallido no se da por ejecutado")
+expect(st["hook_state"] is True, "mantiene hook_state para reintentar")
+
+blg.apply_cycle(cfg_hook, st)
+expect(open(HOOK_LOG).read().split() == ["clear", "blocked", "clear"], "reintenta y ejecuta")
+
+before = open(HOOK_LOG).read()
+st_dry = blg.default_state()
+SOURCE.update(blocked=True, blocked_ips=5)
+blg.apply_cycle(cfg_hook, st_dry, dry_run=True)
+expect(open(HOOK_LOG).read() == before and st_dry["hook_state"] is None, "dry-run no ejecuta hooks")
+
+st_err = blg.default_state()
+st_err["blocked"] = True
+st_err["hook_state"] = True
+blg.check_blocks = lambda cfg, own: {"blocked": False, "error": "fuente caida",
+                                     "blocked_ips": 0, "blocked_isps": 0, "isp_names": [],
+                                     "mode": "web", "source": "web (error)", "last_update": 0}
+blg.apply_cycle(cfg_hook, st_err)
+expect(st_err["blocked"] is True, "un error de fuente no cambia el estado de bloqueo")
+expect(open(HOOK_LOG).read() == before, "un error de fuente no dispara hooks")
+
 shutil.rmtree(STATE_DIR)
 print("\nTodos los escenarios OK")

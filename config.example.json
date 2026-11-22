@@ -16,5 +16,10 @@
   "source": {
     "txt_base": "https://hayahora.futbol/estado/",
     "max_data_age_hours": 3
+  },
+  "hooks": {
+    "on_blocked": [],
+    "on_clear": [],
+    "timeout_seconds": 30
   }
 }

@@ -25,13 +25,14 @@ import ipaddress
 import json
 import os
 import socket
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 CONFIG_PATH = os.environ.get("BLG_CONFIG", "/etc/laligagate/config.json")
 STATE_DIR = os.environ.get("BLG_STATE_DIR", "/var/lib/laligagate")
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
@@ -456,12 +457,14 @@ def load_config():
     config.setdefault("timing", {})
     config.setdefault("source", {})
     config.setdefault("records", [])
+    config.setdefault("hooks", {})
     config["detection"].setdefault("mode", "global")
     config["detection"].setdefault("min_isps", 1)
     config["timing"].setdefault("interval_minutes", 15)
     config["timing"].setdefault("restore_wait_minutes", 60)
     config["source"].setdefault("txt_base", "https://hayahora.futbol/estado/")
     config["source"].setdefault("max_data_age_hours", 3)
+    config["hooks"].setdefault("timeout_seconds", 30)
     return config
 
 
@@ -479,6 +482,7 @@ def default_state():
         "last_mode": "",
         "last_isp_names": [],
         "blocked_ips": 0,
+        "hook_state": None,
         "own_ips": {"ts": 0, "by_name": {}},
     }
 
@@ -576,6 +580,55 @@ def restore_originals(cloudflare, targets, state):
     return restored
 
 
+def run_hooks(config, state, blocked, dry_run=False):
+    """Ejecuta el hook de transicion una sola vez por cambio de estado.
+
+    Los comandos son listas de argumentos (sin shell). Si fallan se deja
+    hook_state sin actualizar para reintentar en el siguiente ciclo.
+    """
+    hooks = config.get("hooks") or {}
+    if not hooks:
+        return
+
+    key = "on_blocked" if blocked else "on_clear"
+    command = hooks.get(key) or []
+    if isinstance(command, str):
+        command = [command]
+    command = [str(part) for part in command]
+
+    if state.get("hook_state") is blocked:
+        return
+    if not command:
+        if not dry_run:
+            state["hook_state"] = blocked
+        return
+
+    tag = " [dry-run]" if dry_run else ""
+    log("hook %s%s: %s" % (key, tag, " ".join(command)))
+    if dry_run:
+        return
+
+    timeout = int(hooks.get("timeout_seconds", 30))
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except Exception as exc:  # binario ausente, timeout, permisos...
+        log("AVISO: hook %s no se pudo ejecutar: %s" % (key, exc))
+        return
+
+    output = (completed.stdout or "").strip()
+    if output:
+        log("hook %s: %s" % (key, output.replace("\n", " | ")[:300]))
+    if completed.returncode != 0:
+        error = (completed.stderr or completed.stdout or "").strip()
+        log(
+            "AVISO: hook %s devolvio %d; se reintentara en el siguiente ciclo: %s"
+            % (key, completed.returncode, error[:200])
+        )
+        return
+
+    state["hook_state"] = blocked
+
+
 def apply_cycle(config, state, dry_run=False):
     tag = " [dry-run]" if dry_run else ""
     cloudflare = Cloudflare(
@@ -595,11 +648,6 @@ def apply_cycle(config, state, dry_run=False):
 
     status = check_blocks(config, own_ips)
     state["last_check"] = now()
-    state["blocked"] = status["blocked"]
-    state["last_source"] = status["source"]
-    state["last_mode"] = status["mode"]
-    state["last_isp_names"] = status["isp_names"]
-    state["blocked_ips"] = status["blocked_ips"]
 
     if status["error"]:
         state["last_error"] = status["error"]
@@ -608,6 +656,11 @@ def apply_cycle(config, state, dry_run=False):
             save_state(state)
         return
 
+    state["blocked"] = status["blocked"]
+    state["last_source"] = status["source"]
+    state["last_mode"] = status["mode"]
+    state["last_isp_names"] = status["isp_names"]
+    state["blocked_ips"] = status["blocked_ips"]
     state["last_error"] = ""
     isps = ", ".join(status["isp_names"]) if status["isp_names"] else "sin determinar"
     log(
@@ -682,6 +735,11 @@ def apply_cycle(config, state, dry_run=False):
             save_state(state)
 
     elif not dry_run:
+        save_state(state)
+
+    # Los hooks leen el estado ya persistido, asi que van despues del save.
+    run_hooks(config, state, status["blocked"], dry_run=dry_run)
+    if not dry_run:
         save_state(state)
 
 
