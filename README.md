@@ -8,7 +8,8 @@ Consulta [hayahora.futbol](https://hayahora.futbol/) cada N minutos. Si hay
 bloqueos activos, pone los registros DNS indicados en **DNS Only** (sin nube
 naranja). Cuando cesan y pasa el periodo de espera, reactiva el proxy **solo en
 los registros que apagó él**, con su TTL original; nunca activa un registro que
-ya era DNS Only.
+ya era DNS Only. Además, en cada transición ejecuta los *hooks* configurados,
+útiles para conmutar otros servicios de la red (por ejemplo, el resolver DNS).
 
 ## Cómo funciona
 
@@ -40,6 +41,10 @@ stateDiagram-v2
   Solo aplica a `global` y `own_ip`.
 - **Override manual**: `proxy off` congela el automatismo; `proxy on` restaura
   al instante; `proxy auto` devuelve el control al servicio.
+- **Hooks**: al cambiar el estado de bloqueo se ejecutan comandos configurables
+  (`hooks.on_blocked` / `hooks.on_clear`) en la misma pasada, sin esperar al
+  siguiente intervalo. Sirven, por ejemplo, para conmutar el resolver DNS de la
+  red mientras dura el bloqueo.
 - **Concurrencia**: un `flock` impide que el demonio y un comando manual hagan
   cambios opuestos a la vez.
 
@@ -103,6 +108,51 @@ Si un hook falla o expira, se registra el aviso y se reintenta en el siguiente
 ciclo (el estado del hook no se actualiza). Un error de la fuente no dispara
 hooks ni cambia el estado de bloqueo. `laligagate check --dry-run` muestra qué
 hook ejecutaría sin lanzarlo.
+
+Los hooks no reciben argumentos: si necesitan el detalle, leen
+`/var/lib/laligagate/state.json`. Campos útiles: `blocked` (verdadero mientras
+hay bloqueo), `hook_state` (último estado notificado), `proxy_off`,
+`last_source` y `last_error`. Se guían por la detección, no por el override
+manual.
+
+#### Ejemplo: conmutar el resolver DNS de la red
+
+Un uso típico es apuntar el DNS doméstico (AdGuard Home, Pi-hole, dnsmasq…) a
+un resolver público que esquive los bloqueos indiscriminados solo mientras hay
+fútbol, y volver al habitual después. El hook debe ser **idempotente**: si los
+upstreams ya son los deseados, no debe hacer nada.
+
+```python
+# /usr/local/bin/dns-conmutar  (esquema, sin dependencias)
+import json
+
+estado = json.load(open("/var/lib/laligagate/state.json"))
+if estado["blocked"]:
+    nuevos = ["https://resolver-alternativo/dns-query"]
+else:
+    nuevos = ["https://resolver-habitual/dns-query"]
+# 1. leer los upstreams actuales del DNS local (API o configuración)
+# 2. si ya coinciden con `nuevos`, salir sin tocar nada
+# 3. escribir `nuevos` y limpiar la caché DNS del resolver
+```
+
+```json
+"hooks": {
+  "on_blocked": ["/usr/local/bin/dns-conmutar"],
+  "on_clear":   ["/usr/local/bin/dns-conmutar"]
+}
+```
+
+Advertencias:
+
+- Los bloqueos de LaLiga son **por IP**: un resolver alternativo solo ayuda si
+  el servicio está detrás de una CDN con IPs alternativas no bloqueadas. No
+  sirve para un origen único.
+- La caché del resolver y la del sistema operativo o el navegador pueden
+  mantener la respuesta anterior hasta que expire su TTL. Limpia la caché del
+  resolver al conmutar.
+- El DNS seguro (DoH) del navegador y los anuncios IPv6 del router pueden
+  saltarse el resolver local.
 
 ## Comandos
 
