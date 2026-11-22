@@ -1,6 +1,6 @@
 # laligagate
 
-Servicio autónomo (sin WordPress, sin dependencias) que desactiva el proxy de
+Servicio autónomo (sin dependencias) que desactiva el proxy de
 Cloudflare mientras hay bloqueos de IP por fútbol en España y lo restaura
 cuando terminan.
 
